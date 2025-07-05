@@ -4,6 +4,10 @@ const express = require("express");
 const mysql = require("mysql2");
 const bodyParser = require("body-parser");
 const cors = require("cors");
+const jwt = require("jsonwebtoken");
+const bcrypt = require("bcrypt");
+
+const JWT_SECRET = process.env.JWT_SECRET || "supersecretjwtkey"; // Use environment variable for production
 
 const app = express();
 app.use(bodyParser.json());
@@ -23,19 +27,99 @@ db.connect((err) => {
     console.error("Database connection error:", err);
   } else {
     console.log("Connected to the MySQL database.");
-    const createTableQuery = `CREATE TABLE IF NOT EXISTS employees (name VARCHAR(255) NOT NULL,employee_id VARCHAR(255) NOT NULL primary key, email VARCHAR(255) NOT NULL,phone_number VARCHAR(15),department
- VARCHAR(100),date_of_joining DATE,role VARCHAR(100),date_of_birth DATE);`;
-    
-    db.execute(createTableQuery, (err) => {
+    const createEmployeesTableQuery = `CREATE TABLE IF NOT EXISTS employees (name VARCHAR(255) NOT NULL,employee_id VARCHAR(255) NOT NULL primary key, email VARCHAR(255) NOT NULL,phone_number VARCHAR(15),department VARCHAR(100),date_of_joining DATE,role VARCHAR(100),date_of_birth DATE);`;
+    const createUsersTableQuery = `CREATE TABLE IF NOT EXISTS users (id INT AUTO_INCREMENT PRIMARY KEY, username VARCHAR(255) NOT NULL UNIQUE, password VARCHAR(255) NOT NULL);`;
+
+    db.execute(createEmployeesTableQuery, (err) => {
       if (err) {
-        console.error("Error creating table:", err);
+        console.error("Error creating employees table:", err);
       } else {
         console.log("Employees table is ready.");
       }
     });
+
+    db.execute(createUsersTableQuery, (err) => {
+      if (err) {
+        console.error("Error creating users table:", err);
+      } else {
+        console.log("Users table is ready.");
+      }
+    });
   }
 });
-app.post("/employees", (req, res) => {
+
+// Middleware to verify JWT
+const authenticateToken = (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+
+  if (token == null) return res.sendStatus(401); // No token
+
+  jwt.verify(token, JWT_SECRET, (err, user) => {
+    if (err) return res.sendStatus(403); // Invalid token
+    req.user = user;
+    next();
+  });
+};
+
+// User Registration
+app.post("/register", async (req, res) => {
+  const { username, password } = req.body;
+
+  if (!username || !password) {
+    return res.status(400).json({ message: "Username and password are required." });
+  }
+
+  try {
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const query = "INSERT INTO users (username, password) VALUES (?, ?)";
+    db.execute(query, [username, hashedPassword], (err, result) => {
+      if (err) {
+        if (err.code === "ER_DUP_ENTRY") {
+          return res.status(409).json({ message: "Username already exists." });
+        }
+        console.error(err);
+        return res.status(500).json({ message: "Error registering user." });
+      }
+      res.status(201).json({ message: "User registered successfully." });
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server error during registration." });
+  }
+});
+
+// User Login
+app.post("/login", (req, res) => {
+  const { username, password } = req.body;
+
+  if (!username || !password) {
+    return res.status(400).json({ message: "Username and password are required." });
+  }
+
+  const query = "SELECT * FROM users WHERE username = ?";
+  db.execute(query, [username], async (err, results) => {
+    if (err) {
+      console.error(err);
+      return res.status(500).json({ message: "Server error during login." });
+    }
+    if (results.length === 0) {
+      return res.status(400).json({ message: "Invalid credentials." });
+    }
+
+    const user = results[0];
+    const isMatch = await bcrypt.compare(password, user.password);
+
+    if (!isMatch) {
+      return res.status(400).json({ message: "Invalid credentials." });
+    }
+
+    const token = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET, { expiresIn: '1h' });
+    res.status(200).json({ message: "Logged in successfully.", token });
+  });
+});
+
+app.post("/employees", authenticateToken, (req, res) => {
   const {
     name,
     employee_id,
@@ -116,7 +200,7 @@ app.post("/employees", (req, res) => {
   );
 });
 
-app.get("/employees", (req, res) => {
+app.get("/employees", authenticateToken, (req, res) => {
   db.execute("SELECT * FROM employees", (err, results) => {
     if (err) {
       console.error(err);
@@ -126,7 +210,7 @@ app.get("/employees", (req, res) => {
   });
 });
 
-app.get("/employees/:id", (req, res) => {
+app.get("/employees/:id", authenticateToken, (req, res) => {
   const { id } = req.params;
   db.execute("SELECT * FROM employees WHERE id = ?", [id], (err, result) => {
     if (err) {
@@ -140,7 +224,7 @@ app.get("/employees/:id", (req, res) => {
   });
 });
 
-app.put("/employees/:id", (req, res) => {
+app.put("/employees/:id", authenticateToken, (req, res) => {
   const { id } = req.params;
   const {
     name,
@@ -199,7 +283,7 @@ app.put("/employees/:id", (req, res) => {
   );
 });
 
-app.delete("/employees/:id", (req, res) => {
+app.delete("/employees/:id", authenticateToken, (req, res) => {
   const { id } = req.params;
   db.execute("DELETE FROM employees WHERE id = ?", [id], (err, result) => {
     if (err) {
